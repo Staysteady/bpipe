@@ -1,5 +1,5 @@
 import dash
-from dash import html, dcc, Input, Output, callback
+from dash import html, dcc, Input, Output, State, callback
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime, timedelta
@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from data.bloomberg_client import BloombergClient
 from data.database import DatabaseManager
+from data.mastodon_client import MastodonClient
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +29,7 @@ THEME = {
     'info': '#17a2b8'
 }
 
-app = dash.Dash(__name__)
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
 
 def create_price_card(metal_name, price, change, change_pct):
     """Create a price card component for a metal"""
@@ -105,28 +106,95 @@ app.layout = html.Div([
         'borderRadius': '8px'
     }),
     
-    # Simple chart for now
+    # Chart and Mastodon section side by side
     html.Div([
-        html.H4("Real-time Price Chart", style={'color': THEME['text']}),
-        dcc.Dropdown(
-            id='metal-selector',
-            options=[
-                {'label': 'Copper', 'value': 'copper'},
-                {'label': 'Aluminum', 'value': 'aluminum'},
-                {'label': 'Zinc', 'value': 'zinc'},
-                {'label': 'Nickel', 'value': 'nickel'},
-                {'label': 'Lead', 'value': 'lead'},
-                {'label': 'Tin', 'value': 'tin'}
-            ],
-            value='copper',
-            style={'marginBottom': '10px', 'backgroundColor': THEME['background']}
-        ),
-        dcc.Graph(id='simple-price-chart')
+        # Chart section (left half)
+        html.Div([
+            html.H4("Real-time Price Chart", style={'color': THEME['text']}),
+            dcc.Dropdown(
+                id='metal-selector',
+                options=[
+                    {'label': 'Copper', 'value': 'copper'},
+                    {'label': 'Aluminum', 'value': 'aluminum'},
+                    {'label': 'Zinc', 'value': 'zinc'},
+                    {'label': 'Nickel', 'value': 'nickel'},
+                    {'label': 'Lead', 'value': 'lead'},
+                    {'label': 'Tin', 'value': 'tin'}
+                ],
+                value='copper',
+                style={'marginBottom': '10px', 'backgroundColor': THEME['background']}
+            ),
+            dcc.Graph(id='simple-price-chart')
+        ], style={
+            'backgroundColor': THEME['card_background'],
+            'padding': '20px',
+            'margin': '15px 5px 15px 0',
+            'borderRadius': '8px',
+            'width': '48%',
+            'display': 'inline-block',
+            'verticalAlign': 'top'
+        }),
+        
+        # Mastodon section (right half)
+        html.Div([
+            html.H4("Mastodon Feed", style={'color': THEME['text'], 'marginBottom': '15px'}),
+            
+            # Connection status
+            html.Div(id='mastodon-status', style={'marginBottom': '15px'}),
+            
+            # Connect button
+            html.Button(
+                "Connect to Mastodon", 
+                id='mastodon-connect-btn',
+                style={
+                    'backgroundColor': THEME['accent'],
+                    'color': 'white',
+                    'border': 'none',
+                    'padding': '10px 20px',
+                    'borderRadius': '5px',
+                    'cursor': 'pointer',
+                    'marginBottom': '15px'
+                }
+            ),
+            
+            # Following selection (hidden until connected)
+            html.Div([
+                html.H5("Select Users to Follow:", style={'color': THEME['text'], 'marginBottom': '10px'}),
+                dcc.Dropdown(
+                    id='mastodon-following-selector',
+                    multi=True,
+                    placeholder="Select users to monitor...",
+                    style={'marginBottom': '15px', 'backgroundColor': THEME['background']}
+                )
+            ], id='mastodon-following-section', style={'display': 'none'}),
+            
+            # Posts feed
+            html.Div(id='mastodon-posts', style={
+                'height': '400px',
+                'overflowY': 'auto',
+                'border': f'1px solid {THEME["accent"]}',
+                'borderRadius': '5px',
+                'padding': '10px'
+            }),
+            
+            # Hidden elements for callbacks (initially not displayed)
+            html.Div([
+                dcc.Input(id='mastodon-auth-code', style={'display': 'none'}),
+                html.Button(id='mastodon-submit-code', style={'display': 'none'})
+            ], style={'display': 'none'})
+        ], style={
+            'backgroundColor': THEME['card_background'],
+            'padding': '20px',
+            'margin': '15px 0 15px 5px',
+            'borderRadius': '8px',
+            'width': '48%',
+            'display': 'inline-block',
+            'verticalAlign': 'top'
+        })
     ], style={
-        'backgroundColor': THEME['card_background'],
-        'padding': '20px',
-        'margin': '15px 0',
-        'borderRadius': '8px'
+        'width': '100%',
+        'display': 'flex',
+        'gap': '10px'
     })
     
 ], style={
@@ -248,6 +316,166 @@ def update_simple_chart(selected_metal, n):
             title=f"Chart Error: {str(e)[:30]}..."
         )
         return fig
+
+# Mastodon callbacks
+mastodon_client = MastodonClient()
+
+@callback(
+    [Output('mastodon-status', 'children'),
+     Output('mastodon-following-section', 'style'),
+     Output('mastodon-connect-btn', 'children'),
+     Output('mastodon-following-selector', 'options')],
+    [Input('mastodon-connect-btn', 'n_clicks')]
+)
+def handle_mastodon_connection(n_clicks):
+    """Handle Mastodon connection button click"""
+    if n_clicks is None:
+        # Initial load - check for saved credentials
+        if mastodon_client.connect_with_saved_credentials():
+            user_info = mastodon_client.get_user_info()
+            status = html.Div([
+                html.Span(f"✅ Connected as @{user_info['username']}", 
+                         style={'color': THEME['success']})
+            ])
+            # Also populate following list for saved credentials
+            following_list = mastodon_client.get_following_list()
+            options = [
+                {
+                    'label': f"@{account['username']} ({account['display_name']})",
+                    'value': account['id']
+                }
+                for account in following_list
+            ]
+            return status, {'display': 'block'}, "Disconnect", options
+        else:
+            status = html.Div([
+                html.Span("❌ Not connected", style={'color': THEME['danger']})
+            ])
+            return status, {'display': 'none'}, "Connect to Mastodon", []
+    
+    # Button clicked
+    if mastodon_client.is_connected:
+        # Disconnect
+        mastodon_client.disconnect()
+        status = html.Div([
+            html.Span("❌ Disconnected", style={'color': THEME['danger']})
+        ])
+        return status, {'display': 'none'}, "Connect to Mastodon", []
+    else:
+        # Show connection instructions
+        auth_url = mastodon_client.get_auth_url('https://mastodon.social')
+        status = html.Div([
+            html.P("To connect to Mastodon:", style={'color': THEME['text'], 'margin': '5px 0'}),
+            html.P([
+                "1. Visit: ",
+                html.A("Authorization Link", href=auth_url, target="_blank", 
+                      style={'color': THEME['accent']})
+            ], style={'color': THEME['text'], 'margin': '5px 0'}),
+            html.P("2. Copy the authorization code", style={'color': THEME['text'], 'margin': '5px 0'}),
+            html.P("3. Enter it below:", style={'color': THEME['text'], 'margin': '5px 0'}),
+            dcc.Input(
+                id='mastodon-auth-code',
+                type='text',
+                placeholder='Enter authorization code...',
+                style={'width': '100%', 'padding': '5px', 'marginBottom': '10px'}
+            ),
+            html.Button(
+                "Submit Code",
+                id='mastodon-submit-code',
+                style={
+                    'backgroundColor': THEME['accent'],
+                    'color': 'white',
+                    'border': 'none',
+                    'padding': '8px 16px',
+                    'borderRadius': '5px',
+                    'cursor': 'pointer'
+                }
+            )
+        ])
+        return status, {'display': 'none'}, "Connect to Mastodon", []
+
+@callback(
+    Output('mastodon-following-selector', 'value'),
+    [Input('mastodon-submit-code', 'n_clicks')],
+    [State('mastodon-auth-code', 'value')]
+)
+def handle_auth_code(n_clicks, auth_code):
+    """Handle authorization code submission"""
+    if n_clicks is None or not auth_code:
+        return []
+    
+    try:
+        if mastodon_client.authenticate_with_code(auth_code):
+            return []  # Clear selection after successful auth
+        else:
+            return []
+    except Exception as e:
+        logger.error(f"Error handling auth code: {e}")
+        return []
+
+@callback(
+    Output('mastodon-posts', 'children'),
+    [Input('interval-component', 'n_intervals'),
+     Input('mastodon-following-selector', 'value')]
+)
+def update_mastodon_posts(n_intervals, selected_accounts):
+    """Update Mastodon posts feed"""
+    if not mastodon_client.is_connected or not selected_accounts:
+        return html.Div([
+            html.P("Connect to Mastodon and select accounts to see posts", 
+                  style={'color': THEME['text'], 'textAlign': 'center', 'padding': '20px'})
+        ])
+    
+    try:
+        posts = mastodon_client.get_recent_posts(selected_accounts, limit=10)
+        
+        if not posts:
+            return html.Div([
+                html.P("No recent posts found", 
+                      style={'color': THEME['text'], 'textAlign': 'center', 'padding': '20px'})
+            ])
+        
+        post_elements = []
+        for post in posts:
+            # Strip HTML from content
+            import re
+            clean_content = re.sub(r'<[^>]+>', '', post['content'])
+            if len(clean_content) > 200:
+                clean_content = clean_content[:200] + "..."
+            
+            post_element = html.Div([
+                html.Div([
+                    html.Strong(f"@{post['account_username']}", 
+                              style={'color': THEME['accent']}),
+                    html.Span(f" • {post['created_at'].strftime('%H:%M')}", 
+                             style={'color': THEME['text'], 'fontSize': '12px', 'marginLeft': '10px'})
+                ], style={'marginBottom': '5px'}),
+                html.P(clean_content, style={'color': THEME['text'], 'margin': '0 0 10px 0'}),
+                html.Div([
+                    html.Span(f"❤️ {post['favourites_count']}", 
+                             style={'color': THEME['text'], 'fontSize': '12px', 'marginRight': '15px'}),
+                    html.Span(f"🔄 {post['reblogs_count']}", 
+                             style={'color': THEME['text'], 'fontSize': '12px', 'marginRight': '15px'}),
+                    html.A("View", href=post['url'], target="_blank", 
+                          style={'color': THEME['accent'], 'fontSize': '12px'})
+                ])
+            ], style={
+                'backgroundColor': '#333',
+                'padding': '10px',
+                'margin': '5px 0',
+                'borderRadius': '5px',
+                'borderLeft': f'3px solid {THEME["accent"]}'
+            })
+            post_elements.append(post_element)
+        
+        return post_elements
+        
+    except Exception as e:
+        logger.error(f"Error updating Mastodon posts: {e}")
+        return html.Div([
+            html.P(f"Error loading posts: {str(e)[:50]}...", 
+                  style={'color': THEME['danger'], 'textAlign': 'center', 'padding': '20px'})
+        ])
 
 if __name__ == '__main__':
     app.run_server(debug=True)

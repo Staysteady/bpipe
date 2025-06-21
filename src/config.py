@@ -34,5 +34,10 @@ class Config:
         'price_change_pct': 2.0,
         'volume_spike_multiplier': 3.0
     }
+    
+    # Mastodon Settings
+    DEFAULT_MASTODON_INSTANCE = os.getenv('MASTODON_INSTANCE', 'https://mastodon.social')
+    MASTODON_CREDENTIALS_PATH = os.getenv('MASTODON_CREDENTIALS_PATH', 'data/mastodon_credentials.json')
+    MASTODON_POST_REFRESH_FREQUENCY = int(os.getenv('MASTODON_POST_REFRESH_FREQUENCY', 60))  # seconds
 
 config = Config()
