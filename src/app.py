@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from data.bloomberg_client import BloombergClient
 from data.database import DatabaseManager
-from data.mastodon_client import MastodonClient
+from auth import auth_manager
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +30,7 @@ THEME = {
 }
 
 app = dash.Dash(__name__, suppress_callback_exceptions=True)
+app.title = "Bloomberg Terminal Dashboard"
 
 def create_price_card(metal_name, price, change, change_pct):
     """Create a price card component for a metal"""
@@ -54,161 +55,316 @@ def create_price_card(metal_name, price, change, change_pct):
         'minWidth': '150px'
     })
 
-def create_alerts_card(alert_count):
-    """Create alerts summary card"""
-    return html.Div([
-        html.H4("Active Alerts", style={'color': THEME['text'], 'margin': '0'}),
-        html.H2(str(alert_count), style={'color': THEME['warning'], 'margin': '5px 0'}),
-        html.P("Price thresholds", style={'color': THEME['text'], 'fontSize': '12px', 'margin': '0'})
-    ], style={
-        'backgroundColor': THEME['card_background'],
-        'padding': '15px',
-        'margin': '5px',
-        'borderRadius': '8px',
-        'textAlign': 'center',
-        'minWidth': '150px'
-    })
-
+# Single page layout that contains everything to avoid callback issues
 app.layout = html.Div([
-    # Header
-    html.Div([
-        html.H1("Bloomberg Terminal Integration Dashboard", 
-                style={'color': THEME['text'], 'textAlign': 'center', 'margin': '0'}),
-        html.P("Real-time LME Metals Trading Dashboard", 
-               style={'color': THEME['accent'], 'textAlign': 'center', 'margin': '10px 0'})
-    ], style={'marginBottom': '20px'}),
+    # Session stores
+    dcc.Store(id='session-store', storage_type='session'),
+    dcc.Store(id='user-store', storage_type='session'),
+    dcc.Location(id='url', refresh=False),
     
-    # Auto-refresh interval component
-    dcc.Interval(
-        id='interval-component',
-        interval=30*1000,  # Update every 30 seconds
-        n_intervals=0
-    ),
-    
-    # Status indicators
-    html.Div([
-        html.Div(id='connection-status', style={'marginBottom': '10px'})
-    ]),
-    
-    # Price cards row
-    html.Div([
-        html.H3("Current LME Prices", style={'color': THEME['text'], 'marginBottom': '15px'}),
-        html.Div(id='price-cards-container', style={
-            'display': 'flex',
-            'flexWrap': 'wrap',
-            'justifyContent': 'center',
-            'gap': '10px'
-        })
-    ], style={
-        'backgroundColor': THEME['card_background'],
-        'padding': '20px',
-        'margin': '10px 0',
-        'borderRadius': '8px'
-    }),
-    
-    # Chart and Mastodon section side by side
-    html.Div([
-        # Chart section (left half)
-        html.Div([
-            html.H4("Real-time Price Chart", style={'color': THEME['text']}),
-            dcc.Dropdown(
-                id='metal-selector',
-                options=[
-                    {'label': 'Copper', 'value': 'copper'},
-                    {'label': 'Aluminum', 'value': 'aluminum'},
-                    {'label': 'Zinc', 'value': 'zinc'},
-                    {'label': 'Nickel', 'value': 'nickel'},
-                    {'label': 'Lead', 'value': 'lead'},
-                    {'label': 'Tin', 'value': 'tin'}
-                ],
-                value='copper',
-                style={'marginBottom': '10px', 'backgroundColor': THEME['background']}
-            ),
-            dcc.Graph(id='simple-price-chart')
-        ], style={
-            'backgroundColor': THEME['card_background'],
-            'padding': '20px',
-            'margin': '15px 5px 15px 0',
-            'borderRadius': '8px',
-            'width': '48%',
-            'display': 'inline-block',
-            'verticalAlign': 'top'
-        }),
-        
-        # Mastodon section (right half)
-        html.Div([
-            html.H4("Mastodon Feed", style={'color': THEME['text'], 'marginBottom': '15px'}),
-            
-            # Connection status
-            html.Div(id='mastodon-status', style={'marginBottom': '15px'}),
-            
-            # Connect button
-            html.Button(
-                "Connect to Mastodon", 
-                id='mastodon-connect-btn',
-                style={
-                    'backgroundColor': THEME['accent'],
-                    'color': 'white',
-                    'border': 'none',
-                    'padding': '10px 20px',
-                    'borderRadius': '5px',
-                    'cursor': 'pointer',
-                    'marginBottom': '15px'
-                }
-            ),
-            
-            # Following selection (hidden until connected)
+    # Login/Dashboard content
+    html.Div(id='main-content', children=[
+        # Login page (shown by default)
+        html.Div(id='login-page', children=[
             html.Div([
-                html.H5("Select Users to Follow:", style={'color': THEME['text'], 'marginBottom': '10px'}),
-                dcc.Dropdown(
-                    id='mastodon-following-selector',
-                    multi=True,
-                    placeholder="Select users to monitor...",
-                    style={'marginBottom': '15px', 'backgroundColor': THEME['background']}
-                )
-            ], id='mastodon-following-section', style={'display': 'none'}),
+                html.Div([
+                    html.H1("Bloomberg Terminal Dashboard", 
+                            style={'color': THEME['text'], 'textAlign': 'center', 'marginBottom': '10px'}),
+                    html.P("Please sign in to access the dashboard", 
+                           style={'color': THEME['accent'], 'textAlign': 'center', 'marginBottom': '30px'}),
+                    
+                    # Login Form
+                    html.Div([
+                        html.H3("Sign In", style={'color': THEME['text'], 'marginBottom': '20px'}),
+                        
+                        # Username field
+                        html.Div([
+                            html.Label("Username:", style={'color': THEME['text'], 'marginBottom': '5px', 'display': 'block'}),
+                            dcc.Input(
+                                id='login-username',
+                                type='text',
+                                placeholder='Enter your username',
+                                value='admin',  # Pre-fill for testing
+                                style={
+                                    'width': '100%',
+                                    'padding': '10px',
+                                    'marginBottom': '15px',
+                                    'borderRadius': '5px',
+                                    'border': '1px solid #555',
+                                    'backgroundColor': THEME['background'],
+                                    'color': THEME['text']
+                                }
+                            )
+                        ]),
+                        
+                        # Password field
+                        html.Div([
+                            html.Label("Password:", style={'color': THEME['text'], 'marginBottom': '5px', 'display': 'block'}),
+                            dcc.Input(
+                                id='login-password',
+                                type='password',
+                                placeholder='Enter your password',
+                                value='admin123',  # Pre-fill for testing
+                                style={
+                                    'width': '100%',
+                                    'padding': '10px',
+                                    'marginBottom': '20px',
+                                    'borderRadius': '5px',
+                                    'border': '1px solid #555',
+                                    'backgroundColor': THEME['background'],
+                                    'color': THEME['text']
+                                }
+                            )
+                        ]),
+                        
+                        # Login button
+                        html.Button(
+                            "Sign In",
+                            id='login-button',
+                            n_clicks=0,
+                            style={
+                                'width': '100%',
+                                'padding': '12px',
+                                'backgroundColor': THEME['accent'],
+                                'color': 'white',
+                                'border': 'none',
+                                'borderRadius': '5px',
+                                'cursor': 'pointer',
+                                'fontSize': '16px',
+                                'marginBottom': '15px'
+                            }
+                        ),
+                        
+                        # Error message
+                        html.Div(id='login-error', style={'color': THEME['danger'], 'textAlign': 'center', 'marginBottom': '15px'}),
+                        
+                        # Quick info
+                        html.Div([
+                            html.P("Demo credentials are pre-filled", style={'color': THEME['info'], 'fontSize': '12px', 'textAlign': 'center'})
+                        ])
+                        
+                    ], style={
+                        'backgroundColor': THEME['card_background'],
+                        'padding': '30px',
+                        'borderRadius': '10px',
+                        'width': '100%',
+                        'maxWidth': '400px'
+                    })
+                    
+                ], style={
+                    'display': 'flex',
+                    'flexDirection': 'column',
+                    'alignItems': 'center',
+                    'minHeight': '100vh',
+                    'justifyContent': 'center'
+                })
+            ], style={
+                'backgroundColor': THEME['background'],
+                'minHeight': '100vh',
+                'padding': '20px',
+                'fontFamily': 'Arial, sans-serif'
+            })
+        ]),
+        
+        # Dashboard page (hidden by default)
+        html.Div(id='dashboard-page', children=[
+            # Header with logout
+            html.Div([
+                html.Div([
+                    html.H1("Bloomberg Terminal Integration Dashboard", 
+                            style={'color': THEME['text'], 'margin': '0', 'display': 'inline-block'}),
+                    html.Div([
+                        html.Span(id='current-user-display', style={'color': THEME['accent'], 'marginRight': '15px'}),
+                        html.Button(
+                            "Logout",
+                            id='logout-button',
+                            style={
+                                'backgroundColor': THEME['danger'],
+                                'color': 'white',
+                                'border': 'none',
+                                'padding': '8px 16px',
+                                'borderRadius': '5px',
+                                'cursor': 'pointer'
+                            }
+                        )
+                    ], style={'float': 'right'})
+                ], style={'overflow': 'hidden', 'marginBottom': '10px'}),
+                html.P("Real-time LME Metals Trading Dashboard", 
+                       style={'color': THEME['accent'], 'textAlign': 'center', 'margin': '10px 0'})
+            ], style={'marginBottom': '20px'}),
             
-            # Posts feed
-            html.Div(id='mastodon-posts', style={
-                'height': '400px',
-                'overflowY': 'auto',
-                'border': f'1px solid {THEME["accent"]}',
-                'borderRadius': '5px',
-                'padding': '10px'
+            # Auto-refresh interval component
+            dcc.Interval(
+                id='interval-component',
+                interval=30*1000,  # Update every 30 seconds
+                n_intervals=0
+            ),
+            
+            # Status indicators
+            html.Div([
+                html.Div(id='connection-status', style={'marginBottom': '10px'})
+            ]),
+            
+            # Price cards row
+            html.Div([
+                html.H3("Current LME Prices", style={'color': THEME['text'], 'marginBottom': '15px'}),
+                html.Div(id='price-cards-container', style={
+                    'display': 'flex',
+                    'flexWrap': 'wrap',
+                    'justifyContent': 'center',
+                    'gap': '10px'
+                })
+            ], style={
+                'backgroundColor': THEME['card_background'],
+                'padding': '20px',
+                'margin': '10px 0',
+                'borderRadius': '8px'
             }),
             
-            # Hidden elements for callbacks (initially not displayed)
+            # Chart section
             html.Div([
-                dcc.Input(id='mastodon-auth-code', style={'display': 'none'}),
-                html.Button(id='mastodon-submit-code', style={'display': 'none'})
-            ], style={'display': 'none'})
+                html.H4("Real-time Price Chart", style={'color': THEME['text']}),
+                dcc.Dropdown(
+                    id='metal-selector',
+                    options=[
+                        {'label': 'Copper', 'value': 'copper'},
+                        {'label': 'Aluminum', 'value': 'aluminum'},
+                        {'label': 'Zinc', 'value': 'zinc'},
+                        {'label': 'Nickel', 'value': 'nickel'},
+                        {'label': 'Lead', 'value': 'lead'},
+                        {'label': 'Tin', 'value': 'tin'}
+                    ],
+                    value='copper',
+                    style={'marginBottom': '10px', 'backgroundColor': THEME['background']}
+                ),
+                dcc.Graph(id='simple-price-chart')
+            ], style={
+                'backgroundColor': THEME['card_background'],
+                'padding': '20px',
+                'margin': '15px 0',
+                'borderRadius': '8px'
+            })
         ], style={
-            'backgroundColor': THEME['card_background'],
+            'backgroundColor': THEME['background'], 
+            'minHeight': '100vh', 
             'padding': '20px',
-            'margin': '15px 0 15px 5px',
-            'borderRadius': '8px',
-            'width': '48%',
-            'display': 'inline-block',
-            'verticalAlign': 'top'
+            'fontFamily': 'Arial, sans-serif'
         })
-    ], style={
-        'width': '100%',
-        'display': 'flex',
-        'gap': '10px'
-    })
-    
-], style={
-    'backgroundColor': THEME['background'], 
-    'minHeight': '100vh', 
-    'padding': '20px',
-    'fontFamily': 'Arial, sans-serif'
-})
+    ])
+])
 
-# Simplified callback for price cards
+# Login callback
+@callback(
+    [Output('login-page', 'style'),
+     Output('dashboard-page', 'style'),
+     Output('session-store', 'data'),
+     Output('user-store', 'data'),
+     Output('login-error', 'children'),
+     Output('current-user-display', 'children')],
+    [Input('login-button', 'n_clicks'),
+     Input('logout-button', 'n_clicks')],
+    [State('login-username', 'value'),
+     State('login-password', 'value'),
+     State('session-store', 'data')],
+    prevent_initial_call=False
+)
+def handle_auth(login_clicks, logout_clicks, username, password, session_data):
+    """Handle login and logout"""
+    ctx = dash.callback_context
+    
+    # Check existing session on page load
+    if not ctx.triggered:
+        if session_data and session_data.get('session_id'):
+            try:
+                valid, user = auth_manager.validate_session(session_data['session_id'])
+                if valid:
+                    # Show dashboard
+                    return (
+                        {'display': 'none'},  # hide login
+                        {'display': 'block'},  # show dashboard
+                        session_data,
+                        {'username': user.username, 'role': user.role},
+                        "",
+                        f"Welcome, {user.username}"
+                    )
+            except Exception as e:
+                logger.error(f"Session validation error: {e}")
+        
+        # Show login page by default
+        return (
+            {'display': 'block'},  # show login
+            {'display': 'none'},   # hide dashboard
+            {},
+            {},
+            "",
+            ""
+        )
+    
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    
+    if trigger_id == 'logout-button' and logout_clicks:
+        # Handle logout
+        auth_manager.logout_user()
+        return (
+            {'display': 'block'},  # show login
+            {'display': 'none'},   # hide dashboard
+            {},
+            {},
+            "",
+            ""
+        )
+    
+    elif trigger_id == 'login-button' and login_clicks:
+        # Handle login
+        if not username or not password:
+            return (
+                {'display': 'block'}, {'display': 'none'}, {}, {}, 
+                "Please enter both username and password", ""
+            )
+        
+        try:
+            success, user, error_msg = auth_manager.authenticate_user(username, password)
+            
+            if success:
+                session_data = {'session_id': auth_manager.get_current_session_id()}
+                user_data = {'username': user.username, 'role': user.role}
+                return (
+                    {'display': 'none'},  # hide login
+                    {'display': 'block'}, # show dashboard
+                    session_data,
+                    user_data,
+                    "",
+                    f"Welcome, {user.username}"
+                )
+            else:
+                return (
+                    {'display': 'block'}, {'display': 'none'}, {}, {}, 
+                    error_msg or "Login failed", ""
+                )
+                
+        except Exception as e:
+            logger.error(f"Login error: {e}")
+            return (
+                {'display': 'block'}, {'display': 'none'}, {}, {}, 
+                "An error occurred during login", ""
+            )
+    
+    # Default: show login
+    return (
+        {'display': 'block'},  # show login
+        {'display': 'none'},   # hide dashboard
+        {},
+        {},
+        "",
+        ""
+    )
+
+# Dashboard callbacks (will only run when dashboard is visible)
 @callback(
     [Output('price-cards-container', 'children'),
      Output('connection-status', 'children')],
-    [Input('interval-component', 'n_intervals')]
+    [Input('interval-component', 'n_intervals')],
+    prevent_initial_call=True
 )
 def update_price_cards(n):
     """Update price cards with latest LME prices"""
@@ -243,11 +399,6 @@ def update_price_cards(n):
             card = create_price_card(price.metal_name, price.price, change, change_pct)
             price_cards.append(card)
         
-        # Add alerts card
-        active_alerts = db.get_active_alerts()
-        alerts_card = create_alerts_card(len(active_alerts))
-        price_cards.append(alerts_card)
-        
         # Cleanup
         bloomberg_client.disconnect()
         db.disconnect()
@@ -265,11 +416,11 @@ def update_price_cards(n):
         ])
         return [], error_status
 
-# Simplified chart callback
 @callback(
     Output('simple-price-chart', 'figure'),
     [Input('metal-selector', 'value'),
-     Input('interval-component', 'n_intervals')]
+     Input('interval-component', 'n_intervals')],
+    prevent_initial_call=True
 )
 def update_simple_chart(selected_metal, n):
     """Update simple price chart"""
@@ -316,166 +467,6 @@ def update_simple_chart(selected_metal, n):
             title=f"Chart Error: {str(e)[:30]}..."
         )
         return fig
-
-# Mastodon callbacks
-mastodon_client = MastodonClient()
-
-@callback(
-    [Output('mastodon-status', 'children'),
-     Output('mastodon-following-section', 'style'),
-     Output('mastodon-connect-btn', 'children'),
-     Output('mastodon-following-selector', 'options')],
-    [Input('mastodon-connect-btn', 'n_clicks')]
-)
-def handle_mastodon_connection(n_clicks):
-    """Handle Mastodon connection button click"""
-    if n_clicks is None:
-        # Initial load - check for saved credentials
-        if mastodon_client.connect_with_saved_credentials():
-            user_info = mastodon_client.get_user_info()
-            status = html.Div([
-                html.Span(f"✅ Connected as @{user_info['username']}", 
-                         style={'color': THEME['success']})
-            ])
-            # Also populate following list for saved credentials
-            following_list = mastodon_client.get_following_list()
-            options = [
-                {
-                    'label': f"@{account['username']} ({account['display_name']})",
-                    'value': account['id']
-                }
-                for account in following_list
-            ]
-            return status, {'display': 'block'}, "Disconnect", options
-        else:
-            status = html.Div([
-                html.Span("❌ Not connected", style={'color': THEME['danger']})
-            ])
-            return status, {'display': 'none'}, "Connect to Mastodon", []
-    
-    # Button clicked
-    if mastodon_client.is_connected:
-        # Disconnect
-        mastodon_client.disconnect()
-        status = html.Div([
-            html.Span("❌ Disconnected", style={'color': THEME['danger']})
-        ])
-        return status, {'display': 'none'}, "Connect to Mastodon", []
-    else:
-        # Show connection instructions
-        auth_url = mastodon_client.get_auth_url('https://mastodon.social')
-        status = html.Div([
-            html.P("To connect to Mastodon:", style={'color': THEME['text'], 'margin': '5px 0'}),
-            html.P([
-                "1. Visit: ",
-                html.A("Authorization Link", href=auth_url, target="_blank", 
-                      style={'color': THEME['accent']})
-            ], style={'color': THEME['text'], 'margin': '5px 0'}),
-            html.P("2. Copy the authorization code", style={'color': THEME['text'], 'margin': '5px 0'}),
-            html.P("3. Enter it below:", style={'color': THEME['text'], 'margin': '5px 0'}),
-            dcc.Input(
-                id='mastodon-auth-code',
-                type='text',
-                placeholder='Enter authorization code...',
-                style={'width': '100%', 'padding': '5px', 'marginBottom': '10px'}
-            ),
-            html.Button(
-                "Submit Code",
-                id='mastodon-submit-code',
-                style={
-                    'backgroundColor': THEME['accent'],
-                    'color': 'white',
-                    'border': 'none',
-                    'padding': '8px 16px',
-                    'borderRadius': '5px',
-                    'cursor': 'pointer'
-                }
-            )
-        ])
-        return status, {'display': 'none'}, "Connect to Mastodon", []
-
-@callback(
-    Output('mastodon-following-selector', 'value'),
-    [Input('mastodon-submit-code', 'n_clicks')],
-    [State('mastodon-auth-code', 'value')]
-)
-def handle_auth_code(n_clicks, auth_code):
-    """Handle authorization code submission"""
-    if n_clicks is None or not auth_code:
-        return []
-    
-    try:
-        if mastodon_client.authenticate_with_code(auth_code):
-            return []  # Clear selection after successful auth
-        else:
-            return []
-    except Exception as e:
-        logger.error(f"Error handling auth code: {e}")
-        return []
-
-@callback(
-    Output('mastodon-posts', 'children'),
-    [Input('interval-component', 'n_intervals'),
-     Input('mastodon-following-selector', 'value')]
-)
-def update_mastodon_posts(n_intervals, selected_accounts):
-    """Update Mastodon posts feed"""
-    if not mastodon_client.is_connected or not selected_accounts:
-        return html.Div([
-            html.P("Connect to Mastodon and select accounts to see posts", 
-                  style={'color': THEME['text'], 'textAlign': 'center', 'padding': '20px'})
-        ])
-    
-    try:
-        posts = mastodon_client.get_recent_posts(selected_accounts, limit=10)
-        
-        if not posts:
-            return html.Div([
-                html.P("No recent posts found", 
-                      style={'color': THEME['text'], 'textAlign': 'center', 'padding': '20px'})
-            ])
-        
-        post_elements = []
-        for post in posts:
-            # Strip HTML from content
-            import re
-            clean_content = re.sub(r'<[^>]+>', '', post['content'])
-            if len(clean_content) > 200:
-                clean_content = clean_content[:200] + "..."
-            
-            post_element = html.Div([
-                html.Div([
-                    html.Strong(f"@{post['account_username']}", 
-                              style={'color': THEME['accent']}),
-                    html.Span(f" • {post['created_at'].strftime('%H:%M')}", 
-                             style={'color': THEME['text'], 'fontSize': '12px', 'marginLeft': '10px'})
-                ], style={'marginBottom': '5px'}),
-                html.P(clean_content, style={'color': THEME['text'], 'margin': '0 0 10px 0'}),
-                html.Div([
-                    html.Span(f"❤️ {post['favourites_count']}", 
-                             style={'color': THEME['text'], 'fontSize': '12px', 'marginRight': '15px'}),
-                    html.Span(f"🔄 {post['reblogs_count']}", 
-                             style={'color': THEME['text'], 'fontSize': '12px', 'marginRight': '15px'}),
-                    html.A("View", href=post['url'], target="_blank", 
-                          style={'color': THEME['accent'], 'fontSize': '12px'})
-                ])
-            ], style={
-                'backgroundColor': '#333',
-                'padding': '10px',
-                'margin': '5px 0',
-                'borderRadius': '5px',
-                'borderLeft': f'3px solid {THEME["accent"]}'
-            })
-            post_elements.append(post_element)
-        
-        return post_elements
-        
-    except Exception as e:
-        logger.error(f"Error updating Mastodon posts: {e}")
-        return html.Div([
-            html.P(f"Error loading posts: {str(e)[:50]}...", 
-                  style={'color': THEME['danger'], 'textAlign': 'center', 'padding': '20px'})
-        ])
 
 if __name__ == '__main__':
     app.run_server(debug=True)

@@ -8,13 +8,13 @@ from pathlib import Path
 
 try:
     from ..config import config
-    from .models import MetalPrice, Alert
+    from .models import MetalPrice, Alert, User, UserSession
 except ImportError:
     import sys
     import os
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
     from config import config
-    from data.models import MetalPrice, Alert
+    from data.models import MetalPrice, Alert, User, UserSession
 
 class DatabaseManager:
     """DuckDB database manager for metals trading data"""
@@ -114,6 +114,44 @@ class DatabaseManager:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (date, metal_name)
             )
+        """)
+        
+        # Create users table for authentication
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id VARCHAR PRIMARY KEY,
+                username VARCHAR UNIQUE NOT NULL,
+                email VARCHAR UNIQUE NOT NULL,
+                password_hash VARCHAR NOT NULL,
+                salt VARCHAR NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                last_login TIMESTAMP,
+                is_active BOOLEAN DEFAULT true,
+                role VARCHAR DEFAULT 'user'
+            )
+        """)
+        
+        # Create user_sessions table for session management
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                session_id VARCHAR PRIMARY KEY,
+                user_id VARCHAR NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                is_active BOOLEAN DEFAULT true,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
+        
+        # Create indexes for sessions
+        self.connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sessions_user_id 
+            ON user_sessions(user_id)
+        """)
+        
+        self.connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sessions_expires 
+            ON user_sessions(expires_at)
         """)
         
         self.logger.info("Database schema initialized successfully")
@@ -426,3 +464,221 @@ class DatabaseManager:
         except Exception as e:
             self.logger.error(f"Health check failed: {e}")
             return {"connected": False, "error": str(e)}
+    
+    # User authentication methods
+    def create_user(self, user: User) -> bool:
+        """Create a new user in the database"""
+        if not self.connection:
+            raise ConnectionError("Not connected to database")
+        
+        try:
+            self.connection.execute("""
+                INSERT INTO users (
+                    id, username, email, password_hash, salt,
+                    created_at, last_login, is_active, role
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                user.id, user.username, user.email, user.password_hash,
+                user.salt, user.created_at, user.last_login, 
+                user.is_active, user.role
+            ])
+            self.logger.info(f"Created user: {user.username}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to create user: {e}")
+            return False
+    
+    def get_user_by_username(self, username: str) -> Optional[User]:
+        """Get user by username"""
+        if not self.connection:
+            raise ConnectionError("Not connected to database")
+        
+        try:
+            result = self.connection.execute(
+                "SELECT * FROM users WHERE username = ? AND is_active = true", 
+                [username]
+            ).fetchone()
+            
+            if result:
+                columns = [desc[0] for desc in self.connection.description]
+                row_dict = dict(zip(columns, result))
+                
+                return User(
+                    id=row_dict['id'],
+                    username=row_dict['username'],
+                    email=row_dict['email'],
+                    password_hash=row_dict['password_hash'],
+                    salt=row_dict['salt'],
+                    created_at=row_dict['created_at'],
+                    last_login=row_dict['last_login'],
+                    is_active=row_dict['is_active'],
+                    role=row_dict['role']
+                )
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to get user by username: {e}")
+            return None
+    
+    def get_user_by_email(self, email: str) -> Optional[User]:
+        """Get user by email"""
+        if not self.connection:
+            raise ConnectionError("Not connected to database")
+        
+        try:
+            result = self.connection.execute(
+                "SELECT * FROM users WHERE email = ? AND is_active = true", 
+                [email]
+            ).fetchone()
+            
+            if result:
+                columns = [desc[0] for desc in self.connection.description]
+                row_dict = dict(zip(columns, result))
+                
+                return User(
+                    id=row_dict['id'],
+                    username=row_dict['username'],
+                    email=row_dict['email'],
+                    password_hash=row_dict['password_hash'],
+                    salt=row_dict['salt'],
+                    created_at=row_dict['created_at'],
+                    last_login=row_dict['last_login'],
+                    is_active=row_dict['is_active'],
+                    role=row_dict['role']
+                )
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to get user by email: {e}")
+            return None
+    
+    def update_user_last_login(self, user_id: str) -> bool:
+        """Update user's last login timestamp"""
+        if not self.connection:
+            raise ConnectionError("Not connected to database")
+        
+        try:
+            self.connection.execute(
+                "UPDATE users SET last_login = ? WHERE id = ?",
+                [datetime.now(), user_id]
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to update user last login: {e}")
+            return False
+    
+    # Session management methods
+    def create_session(self, session: UserSession) -> bool:
+        """Create a new user session"""
+        if not self.connection:
+            raise ConnectionError("Not connected to database")
+        
+        try:
+            self.connection.execute("""
+                INSERT INTO user_sessions (
+                    session_id, user_id, created_at, expires_at, is_active
+                ) VALUES (?, ?, ?, ?, ?)
+            """, [
+                session.session_id, session.user_id, session.created_at,
+                session.expires_at, session.is_active
+            ])
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to create session: {e}")
+            return False
+    
+    def get_session(self, session_id: str) -> Optional[UserSession]:
+        """Get session by session ID"""
+        if not self.connection:
+            raise ConnectionError("Not connected to database")
+        
+        try:
+            result = self.connection.execute(
+                "SELECT * FROM user_sessions WHERE session_id = ? AND is_active = true",
+                [session_id]
+            ).fetchone()
+            
+            if result:
+                columns = [desc[0] for desc in self.connection.description]
+                row_dict = dict(zip(columns, result))
+                
+                return UserSession(
+                    session_id=row_dict['session_id'],
+                    user_id=row_dict['user_id'],
+                    created_at=row_dict['created_at'],
+                    expires_at=row_dict['expires_at'],
+                    is_active=row_dict['is_active']
+                )
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to get session: {e}")
+            return None
+    
+    def invalidate_session(self, session_id: str) -> bool:
+        """Invalidate a user session"""
+        if not self.connection:
+            raise ConnectionError("Not connected to database")
+        
+        try:
+            self.connection.execute(
+                "UPDATE user_sessions SET is_active = false WHERE session_id = ?",
+                [session_id]
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to invalidate session: {e}")
+            return False
+    
+    def cleanup_expired_sessions(self) -> int:
+        """Clean up expired sessions and return count of cleaned sessions"""
+        if not self.connection:
+            raise ConnectionError("Not connected to database")
+        
+        try:
+            # First count how many will be affected
+            count_result = self.connection.execute(
+                "SELECT COUNT(*) FROM user_sessions WHERE expires_at < ? AND is_active = true",
+                [datetime.now()]
+            ).fetchone()
+            cleaned_count = count_result[0] if count_result else 0
+            
+            # Then update them
+            self.connection.execute(
+                "UPDATE user_sessions SET is_active = false WHERE expires_at < ? AND is_active = true",
+                [datetime.now()]
+            )
+            
+            self.logger.info(f"Cleaned up {cleaned_count} expired sessions")
+            return cleaned_count
+        except Exception as e:
+            self.logger.error(f"Failed to cleanup expired sessions: {e}")
+            return 0
+    
+    def get_user_by_id(self, user_id: str) -> Optional[User]:
+        """Get user by ID"""
+        if not self.connection:
+            raise ConnectionError("Not connected to database")
+        
+        try:
+            result = self.connection.execute(
+                "SELECT * FROM users WHERE id = ? AND is_active = true", 
+                [user_id]
+            ).fetchone()
+            
+            if result:
+                columns = [desc[0] for desc in self.connection.description]
+                row_dict = dict(zip(columns, result))
+                
+                return User(
+                    id=row_dict['id'],
+                    username=row_dict['username'],
+                    email=row_dict['email'],
+                    password_hash=row_dict['password_hash'],
+                    salt=row_dict['salt'],
+                    created_at=row_dict['created_at'],
+                    last_login=row_dict['last_login'],
+                    is_active=row_dict['is_active'],
+                    role=row_dict['role']
+                )
+            return None
+        except Exception as e:
+            self.logger.error(f"Failed to get user by ID: {e}")
+            return None
